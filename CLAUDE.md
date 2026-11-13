@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this repository is
 
@@ -21,11 +21,18 @@ skills/equity-researching/
     entry-exit-framework.md         buy and sell levels, sizing, tranches, exit rules
   scripts/
     dcf.py                          DCF and reverse DCF from "Expectations Investing"
-    test_dcf.py                     tests against the book's own numbers
+    tests/                          pytest tests against the book's own numbers, one file per group
+      conftest.py                   pytest setup: makes dcf importable; lists the groups
+      util.py                       shared tolerances (BOOK, SHEET, CLOSE) and changed()
+      figures.py                    the published numbers the tests compare against
 archive/dcf-v1-2026-11-11/          superseded DCF engine, kept for reference only
 ```
 
 When `SKILL.md` and a reference disagree, the reference owns its domain, as `SKILL.md` states.
+
+The documents cite each other by section number (for example "valuation-framework 1.9", "valuation-framework Module 4", "memo-standard section 9"). If you renumber or move a section, grep for its old number and update every reference to it.
+
+The `description` in `plugin.json` is the `SKILL.md` frontmatter description cut off at 500 characters. If you change the frontmatter description, update `plugin.json` to match.
 
 ## The DCF script
 
@@ -34,7 +41,10 @@ When `SKILL.md` and a reference disagree, the reference owns its domain, as `SKI
 - The comment at the top of `dcf.py` explains the method and every input.
 - Example inputs: `python3 dcf.py --example`
 - Report: `python3 dcf.py inputs.json` (add `--json` for machine-readable output)
-- Tests, from `skills/equity-researching/scripts/`: `python3 -m unittest -v test_dcf`
+- Tests use pytest, from `skills/equity-researching/scripts/`: `python3 -B -m pytest tests`
+- One file: `python3 -B -m pytest tests/test_reverse_dcf.py` (files: `test_book_table_2_1`, `test_continuing_value`, `test_authors_spreadsheet`, `test_reverse_dcf`, `test_inputs`, `test_command_line`); by name: `-k reverse`
+- Where pytest is not installed (many system Pythons refuse pip installs), run it through uv: `uv run --no-project --with pytest python -B -m pytest tests`
+- A new test goes in the file for its group; numbers from the book or the spreadsheet go in `tests/figures.py`.
 
 The tests reproduce three sources exactly:
 - the book's chapter 2 Summary Illustration (table 2.1);

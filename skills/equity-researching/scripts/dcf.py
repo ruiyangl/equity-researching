@@ -22,15 +22,24 @@ THE IDEA
                  forecast period: how many years of this forecast the price
                  already pays for.
 
-THE ARITHMETIC (each year)
+THE FORECAST (each year, in amounts)
+    Five lines: sales, operating profit, cash taxes, fixed-capital investment
+    and working-capital investment. Give a line's yearly amounts where you
+    have them, for example management's projections; any year without an
+    amount is worked out from that line's rate (its value driver), as in the
+    book:
     sales                       = last year's sales x (1 + sales growth rate)
     operating profit            = sales x operating profit margin
     cash taxes                  = operating profit x cash tax rate
-    NOPAT                       = operating profit - cash taxes
     fixed-capital investment    = change in sales x incremental fixed-capital rate
     working-capital investment  = change in sales x incremental working-capital rate
+    The valuation itself only ever sees the amounts.
+
+THE ARITHMETIC (each year)
+    NOPAT                       = operating profit - cash taxes
     free cash flow              = NOPAT - both investments
     present value               = free cash flow / (1 + cost of capital) ^ year
+                                  (^ (year - 0.5) with mid-year discounting, below)
 
 THE VALUE (if the forecast period ends in that year)
     continuing value   = NOPAT x (1 + growth) / (cost of capital - growth)
@@ -49,21 +58,48 @@ THE VALUE (if the forecast period ends in that year)
     assume growth above inflation, which it says to do very sparingly, enter
     that growth rate as the inflation rate.
 
+DISCOUNTING (not from the book)
+    The book discounts each year's cash flow from the end of that year. Banks
+    usually assume cash comes in through the year, so on average at mid-year,
+    which makes each year's cash flow worth (1 + cost of capital) ^ 0.5 more.
+    They differ on the continuing value, so there are two mid-year choices:
+      year_end                             the book: every amount at a year end (default)
+      mid_year                             free cash flow at mid-year; continuing
+                                           value at the end of the forecast period
+      mid_year_including_continuing_value  the continuing value half a year
+                                           earlier too, as if it were mid-year
+                                           cash flows as well
+    Mid-year adds about 1% (mid_year) to 4% (including continuing value) to the
+    value, and so shortens the market-implied forecast period.
+
 HOW TO RUN IT
     python3 dcf.py inputs.json           print the report
     python3 dcf.py inputs.json --json    print the same results as JSON
     python3 dcf.py --example             print an example inputs file
+    --log-level DEBUG|INFO|WARNING|ERROR how much to log to stderr (default WARNING):
+                                           DEBUG    every row as it is worked out
+                                           INFO     the answers, and the inputs file read
+                                           WARNING  results worth a second look: a
+                                                    negative value per share, or no
+                                                    market-implied forecast period
+                                           ERROR    an inputs file that cannot be read
+                                                    or is rejected (always shown)
 
 THE INPUTS FILE (JSON)
     Rates are decimals: write 7% as 0.07. Money amounts and the share count
     use one unit, for example $ millions and millions of shares.
 
-    starting_sales                     sales of the last full year (year 0)
-    sales_growth_rate                  yearly growth in sales
-    operating_profit_margin            operating profit / sales
-    cash_tax_rate                      cash taxes / operating profit
-    incremental_fixed_capital_rate     fixed-capital investment per $1 of added sales
-    incremental_working_capital_rate   working-capital investment per $1 of added sales
+    The forecast: for each line, its amounts, its rate, or both (amounts for
+    the years they cover, the rate after that).
+      amounts (a list, year 1 first)   rate
+      sales                            sales_growth_rate
+      operating_profit                 operating_profit_margin (operating profit / sales)
+      cash_taxes                       cash_tax_rate (cash taxes / operating profit)
+      fixed_capital_investment         incremental_fixed_capital_rate (per $1 of added sales)
+      working_capital_investment       incremental_working_capital_rate (per $1 of added sales)
+    starting_sales                     sales of the last full year (year 0); needed
+                                       when year 1 of sales or an investment
+                                       comes from a rate
     cost_of_capital                    the discount rate
     continuing_value_method            one of the four names above
     inflation                          needed by the two inflation methods
@@ -72,37 +108,56 @@ THE INPUTS FILE (JSON)
     decline_rate                       yearly decline (decline method only)
     nonoperating_assets                for example excess cash and securities
     debt                               debt and other liabilities
-    shares_outstanding
+    shares_outstanding                 the latest diluted share count a
+                                       filing discloses (see below)
     forecast_years                     your forecast period: gives the DCF
     share_price                        today's price: gives the reverse DCF
     company, ticker, base_year         labels, optional (base_year is year 0)
-    max_years                          how far the table runs, default 25
+    max_years                          how far the table runs, default 25; a line
+                                       given in amounts with no rate ends it at
+                                       its last amount
+    discounting                        year_end (default), mid_year, or
+                                       mid_year_including_continuing_value
 
     Give forecast_years, share_price, or both.
-    The five value drivers (growth, margin, tax rate and the two investment
-    rates) are one number each, held constant as in the book, or a list of
-    yearly numbers whose last entry repeats for every later year.
+    The five rates (growth, margin, tax rate and the two investment rates)
+    are one number each, held constant as in the book, or a list of yearly
+    numbers whose last entry repeats for every later year.
     nonoperating_assets and debt are one number each, or named parts that the
     program adds up, for example {"bonds": 4000, "leases": 170}.
+    shares_outstanding: use the diluted weighted average shares from the
+    latest 10-Q or 10-K income statement; the company has already counted its
+    options and share units there. In a loss year that count leaves them out,
+    so use the cover page's shares outstanding plus restricted stock units.
+    Do not also put the options in debt (the book's other way, which values
+    them instead), or they count twice.
     Any key that starts with "_" is ignored, so notes and sources can live in
     the file.
 """
 
 import argparse
 import json
+import logging
 import sys
 from decimal import ROUND_HALF_UP, Decimal
 
 MAX_YEARS = 25  # the authors' spreadsheet runs 25 years
 
-# The five value drivers. Each is one number or a list of yearly numbers.
-DRIVERS = [
-    "sales_growth_rate",
-    "operating_profit_margin",
-    "cash_tax_rate",
-    "incremental_fixed_capital_rate",
-    "incremental_working_capital_rate",
-]
+# The program's log, on stderr. main() sets its level from --log-level; when
+# another program imports this one, that program's logging settings apply.
+log = logging.getLogger("dcf")
+
+# The five lines of the forecast, each with the rate (value driver) that works
+# it out in a year with no amount given. A rate is one number or a list of
+# yearly numbers; amounts are a list.
+LINES = {
+    "sales": "sales_growth_rate",
+    "operating_profit": "operating_profit_margin",
+    "cash_taxes": "cash_tax_rate",
+    "fixed_capital_investment": "incremental_fixed_capital_rate",
+    "working_capital_investment": "incremental_working_capital_rate",
+}
+DRIVERS = list(LINES.values())
 
 # The continuing value methods and the extra inputs each one needs.
 METHODS = {
@@ -112,16 +167,20 @@ METHODS = {
     "perpetuity_with_decline": ["decline_rate"],
 }
 
-REQUIRED = (
-    ["starting_sales"]
-    + DRIVERS
-    + ["cost_of_capital", "continuing_value_method", "nonoperating_assets", "debt", "shares_outstanding"]
-)
-OPTIONAL = [
-    "inflation", "inflation_recouped", "decline_rate",
+REQUIRED = ["cost_of_capital", "continuing_value_method", "nonoperating_assets", "debt", "shares_outstanding"]
+OPTIONAL = list(LINES) + DRIVERS + [
+    "starting_sales", "inflation", "inflation_recouped", "decline_rate",
     "forecast_years", "share_price",
-    "company", "ticker", "base_year", "max_years",
+    "company", "ticker", "base_year", "max_years", "discounting",
 ]
+
+# How many years earlier than the year end each amount is discounted:
+# (free cash flow, continuing value).
+DISCOUNTING = {
+    "year_end": (0.0, 0.0),
+    "mid_year": (0.5, 0.0),
+    "mid_year_including_continuing_value": (0.5, 0.5),
+}
 
 # The allowed range of each rate. Rates are decimals, so a number such as 7 or
 # 17.5 is almost always a percentage typed by mistake, and is rejected.
@@ -247,6 +306,24 @@ def check_inputs(raw):
         else:
             check(f"'{key}'", inp[key], low, high)
 
+    lines_ok = True
+    for line, driver in LINES.items():
+        if line not in inp and driver not in inp:
+            problems.append(f"give '{line}' (yearly amounts) or '{driver}' (a rate)")
+            lines_ok = False
+        elif line in inp:
+            if not isinstance(inp[line], list) or not inp[line]:
+                problems.append(f"'{line}' must be a list of yearly amounts, year 1 first")
+                lines_ok = False
+            else:
+                for position, amount in enumerate(inp[line], 1):
+                    check(f"'{line}' year {position}", amount, positive=(line == "sales"))
+    year_1_from_a_rate = [line for line in ("sales", "fixed_capital_investment", "working_capital_investment")
+                          if not isinstance(inp.get(line), list) or not inp[line]]
+    if year_1_from_a_rate and "starting_sales" not in inp:
+        problems.append("'starting_sales' is missing: year 1 of " + ", ".join(
+            f"'{line}'" for line in year_1_from_a_rate) + " comes from a rate")
+
     for key in ("nonoperating_assets", "debt"):
         if isinstance(inp.get(key), dict):
             for part, amount in inp[key].items():
@@ -258,14 +335,18 @@ def check_inputs(raw):
         if key in inp:
             check(f"'{key}'", inp[key], positive=True)
 
+    if inp.setdefault("discounting", "year_end") not in DISCOUNTING:
+        problems.append("'discounting' must be one of: " + ", ".join(DISCOUNTING))
+
     max_years = inp.setdefault("max_years", MAX_YEARS)
     if not is_whole_number(max_years) or not 1 <= max_years <= 100:
         problems.append("'max_years' must be a whole number from 1 to 100")
-        max_years = MAX_YEARS
+        inp["max_years"] = MAX_YEARS
+    table = table_years(inp) if lines_ok else inp["max_years"]
     if "forecast_years" in inp:
         years = inp["forecast_years"]
-        if not is_whole_number(years) or not 1 <= years <= max_years:
-            problems.append(f"'forecast_years' must be a whole number from 1 to {max_years}")
+        if not is_whole_number(years) or not 1 <= years <= table:
+            problems.append(f"'forecast_years' must be a whole number from 1 to {table}")
     if "base_year" in inp and not is_whole_number(inp["base_year"]):
         problems.append("'base_year' must be a whole number such as 2025")
     if "forecast_years" not in inp and "share_price" not in inp:
@@ -277,6 +358,7 @@ def check_inputs(raw):
                         " the forecast period, or the continuing value has no meaning")
     if problems:
         raise InputError(problems)
+    log.debug("inputs checked: %s", inp)
     return inp
 
 
@@ -305,34 +387,80 @@ def continuing_value(nopat, cost_of_capital, growth):
     return nopat * (1 + growth) / (cost_of_capital - growth)
 
 
-def build_rows(inp):
-    """One row per year, in the order of the book's table 2.1.
+def table_years(inp):
+    """How many years the table runs: max_years, or fewer when a line has
+    amounts and no rate to carry it past them."""
+    years = inp["max_years"]
+    for line, driver in LINES.items():
+        if driver not in inp:
+            years = min(years, len(inp[line]))
+    return years
 
-    The value columns in a row (continuing value onwards) assume the forecast
-    period ends in that row's year.
+
+def projection(inp):
+    """The forecast in amounts, one dict per year: sales, operating profit,
+    cash taxes and the two investments.
+
+    A year's amount is the one given, if there is one. Otherwise it is worked
+    out from the line's rate by the book's arithmetic (THE FORECAST above).
+    """
+    def given(line, year):
+        amounts = inp.get(line)
+        return amounts[year - 1] if amounts is not None and year <= len(amounts) else None
+
+    def amount(line, year, from_rate):
+        value = given(line, year)
+        return value if value is not None else from_rate(for_year(inp[LINES[line]], year))
+
+    forecast = []
+    last_sales = inp.get("starting_sales")
+    for year in range(1, table_years(inp) + 1):
+        sales = amount("sales", year, lambda growth: last_sales * (1 + growth))
+        operating_profit = amount("operating_profit", year, lambda margin: sales * margin)
+        cash_taxes = amount("cash_taxes", year, lambda tax_rate: operating_profit * tax_rate)
+        fixed = amount("fixed_capital_investment", year, lambda rate: (sales - last_sales) * rate)
+        working = amount("working_capital_investment", year, lambda rate: (sales - last_sales) * rate)
+        forecast.append({
+            "year": year,
+            "sales": sales,
+            "operating_profit": operating_profit,
+            "cash_taxes": cash_taxes,
+            "fixed_capital_investment": fixed,
+            "working_capital_investment": working,
+        })
+        last_sales = sales
+    return forecast
+
+
+def build_rows(inp, forecast):
+    """One row per year of the forecast, in the order of the book's table 2.1.
+
+    Uses the forecast's amounts only, never the rates. The value columns in a
+    row (continuing value onwards) assume the forecast period ends in that
+    row's year.
     """
     cost_of_capital = inp["cost_of_capital"]
     growth = growth_after_forecast_period(inp)
+    log.debug("cost of capital %s, growth after the forecast period %s, discounting %s",
+              cost_of_capital, growth, inp["discounting"])
     nonoperating_assets = total(inp["nonoperating_assets"])
     debt = total(inp["debt"])
+    cash_flow_shift, continuing_value_shift = DISCOUNTING[inp["discounting"]]
 
     rows = []
-    last_sales = inp["starting_sales"]
     cumulative_pv = 0.0
-    for year in range(1, inp["max_years"] + 1):
-        sales = last_sales * (1 + for_year(inp["sales_growth_rate"], year))
-        operating_profit = sales * for_year(inp["operating_profit_margin"], year)
-        cash_taxes = operating_profit * for_year(inp["cash_tax_rate"], year)
+    for line in forecast:
+        year, sales = line["year"], line["sales"]
+        operating_profit, cash_taxes = line["operating_profit"], line["cash_taxes"]
+        fixed, working = line["fixed_capital_investment"], line["working_capital_investment"]
         nopat = operating_profit - cash_taxes
-        added_sales = sales - last_sales
-        fixed = added_sales * for_year(inp["incremental_fixed_capital_rate"], year)
-        working = added_sales * for_year(inp["incremental_working_capital_rate"], year)
         free_cash_flow = nopat - fixed - working
 
-        discount = (1 + cost_of_capital) ** year   # cash arrives at each year end
-        pv_free_cash_flow = free_cash_flow / discount
+        # The book: cash arrives at each year end. Mid-year: half a year sooner.
+        pv_free_cash_flow = free_cash_flow / (1 + cost_of_capital) ** (year - cash_flow_shift)
         cumulative_pv += pv_free_cash_flow
-        pv_continuing_value = continuing_value(nopat, cost_of_capital, growth) / discount
+        pv_continuing_value = (continuing_value(nopat, cost_of_capital, growth)
+                               / (1 + cost_of_capital) ** (year - continuing_value_shift))
 
         corporate_value = cumulative_pv + pv_continuing_value
         shareholder_value = corporate_value + nonoperating_assets - debt
@@ -352,7 +480,10 @@ def build_rows(inp):
             "shareholder_value": shareholder_value,
             "value_per_share": shareholder_value / inp["shares_outstanding"],
         })
-        last_sales = sales
+        log.debug("year %d: sales %.4f, NOPAT %.4f, free cash flow %.4f, PV %.4f, PV of continuing"
+                  " value %.4f, corporate value %.4f, value per share %.4f", year, sales, nopat,
+                  free_cash_flow, pv_free_cash_flow, pv_continuing_value, corporate_value,
+                  rows[-1]["value_per_share"])
     return rows
 
 
@@ -381,6 +512,15 @@ def market_implied_forecast_period(rows, share_price):
         status, label = "more_than_max", "more than " + years_text(len(values))
     else:
         status, label = "none", "none"
+    if status == "found":
+        log.info("market-implied forecast period: %s at a share price of %s", label, share_price)
+    else:
+        log.warning("no market-implied forecast period at a share price of %s: %s", share_price, {
+            "less_than_1": "even a one-year forecast period is worth more than the price",
+            "more_than_max": f"the price is still higher after {len(values)} years",
+            "none": "value per share never reaches the price and falls as the forecast period"
+                    " lengthens (growth costs more than it earns)",
+        }[status])
     return {
         "share_price": share_price,
         "status": status,
@@ -392,7 +532,7 @@ def market_implied_forecast_period(rows, share_price):
 def analyse(raw):
     """Check the inputs, build the table, and read the two answers off it."""
     inp = check_inputs(raw)
-    rows = build_rows(inp)
+    rows = build_rows(inp, projection(inp))
     result = {
         "inputs": inp,
         "growth_after_forecast_period": growth_after_forecast_period(inp),
@@ -408,6 +548,11 @@ def analyse(raw):
             "shareholder_value": row["shareholder_value"],
             "value_per_share": row["value_per_share"],
         }
+        log.info("DCF value per share %.4f with a %d-year forecast period", row["value_per_share"],
+                 inp["forecast_years"])
+        if row["value_per_share"] < 0:
+            log.warning("value per share is negative (%.4f): debt is more than the company is worth"
+                        " with a %d-year forecast period", row["value_per_share"], inp["forecast_years"])
     if "share_price" in inp:
         result["reverse_dcf"] = market_implied_forecast_period(rows, inp["share_price"])
     return result
@@ -457,6 +602,22 @@ def method_text(inp, growth):
     return f"perpetuity with decline (NOPAT falls {rate(inp['decline_rate'])} a year)"
 
 
+# How the report names each line: as amounts, and as a rate.
+LINE_LABELS = {
+    "sales": ("Sales", "Sales growth rate"),
+    "operating_profit": ("Operating profit", "Operating profit margin"),
+    "cash_taxes": ("Cash taxes", "Cash tax rate"),
+    "fixed_capital_investment": ("Fixed-capital investment", "Incremental fixed-capital investment rate"),
+    "working_capital_investment": ("Working-capital investment", "Incremental working-capital investment rate"),
+}
+
+DISCOUNTING_TEXT = {
+    "year_end": "year end (the book)",
+    "mid_year": "mid-year for free cash flow; continuing value at year end",
+    "mid_year_including_continuing_value": "mid-year, continuing value included",
+}
+
+
 def markdown_table(headers, rows):
     lines = ["| " + " | ".join(headers) + " |",
              "|" + "|".join("---:" for _ in headers) + "|"]
@@ -480,15 +641,20 @@ def report(result):
            + (f" Year 0 is {base_year}." if base_year is not None else ""), ""]
 
     # --- Inputs ---
-    lines = [
-        ("Starting sales", money(inp["starting_sales"])),
-        ("Sales growth rate", driver_text(inp["sales_growth_rate"])),
-        ("Operating profit margin", driver_text(inp["operating_profit_margin"])),
-        ("Cash tax rate", driver_text(inp["cash_tax_rate"])),
-        ("Incremental fixed-capital investment rate", driver_text(inp["incremental_fixed_capital_rate"])),
-        ("Incremental working-capital investment rate", driver_text(inp["incremental_working_capital_rate"])),
+    lines = [("Starting sales", money(inp["starting_sales"]))] if "starting_sales" in inp else []
+    for line, driver in LINES.items():
+        amount_label, rate_label = LINE_LABELS[line]
+        if line in inp:
+            text = ", ".join(money(amount) for amount in inp[line])
+            if driver in inp:
+                text += f"; then {rate_label[0].lower() + rate_label[1:]} {driver_text(inp[driver])}"
+            lines.append((amount_label, text))
+        else:
+            lines.append((rate_label, driver_text(inp[driver])))
+    lines += [
         ("Cost of capital", rate(inp["cost_of_capital"])),
         ("Continuing value", method_text(inp, result["growth_after_forecast_period"])),
+        ("Discounting", DISCOUNTING_TEXT[inp["discounting"]]),
         ("Nonoperating assets", amount_text(inp["nonoperating_assets"])),
         ("Debt and other liabilities", amount_text(inp["debt"])),
         ("Shares outstanding", f"{inp['shares_outstanding']:,.2f}"),
@@ -578,7 +744,27 @@ def main(argv=None):
     parser.add_argument("inputs", nargs="?", help="JSON file with the inputs")
     parser.add_argument("--json", action="store_true", help="print the results as JSON")
     parser.add_argument("--example", action="store_true", help="print an example inputs file")
+    parser.add_argument("--log-level", default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="how much to log to stderr (default WARNING)")
     args = parser.parse_args(argv)
+
+    # Log to stderr, so the report or JSON on stdout is never mixed with it.
+    # --log-level sets what this handler prints. The logger lets through
+    # anything either it or the caller's logging (a test runner, say) wants.
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    handler.setLevel(args.log_level)
+    level = log.level
+    log.addHandler(handler)
+    log.setLevel(min(getattr(logging, args.log_level), logging.getLogger().getEffectiveLevel()))
+    try:
+        return run(args, parser)
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(level)
+
+
+def run(args, parser):
 
     if args.example:
         print(json.dumps(EXAMPLE, indent=2))
@@ -589,12 +775,13 @@ def main(argv=None):
         with open(args.inputs, encoding="utf-8") as handle:
             raw = json.load(handle)
     except (OSError, ValueError) as error:      # no such file, or not valid JSON
-        print(f"Cannot read {args.inputs}: {error}", file=sys.stderr)
+        log.error("Cannot read %s: %s", args.inputs, error)
         return 2
+    log.info("read %s", args.inputs)
     try:
         result = analyse(raw)
     except InputError as error:
-        print("Inputs rejected:\n- " + "\n- ".join(error.problems), file=sys.stderr)
+        log.error("Inputs rejected:\n- %s", "\n- ".join(error.problems))
         return 2
     print(json.dumps(result, indent=2) if args.json else report(result))
     return 0

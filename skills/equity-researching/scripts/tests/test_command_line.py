@@ -1,32 +1,12 @@
-"""Running the program the way a user does."""
+"""Running the program the way a user does. The run and save fixtures are in
+conftest.py."""
 
 import json
 
 import pytest
 
-import dcf
 from figures import ILLUSTRATION
 from util import BOOK, changed
-
-
-@pytest.fixture
-def run(capsys):
-    """Run dcf.py with some arguments; give back its exit code, output and errors."""
-    def run_program(*arguments):
-        code = dcf.main(list(arguments))
-        out, err = capsys.readouterr()
-        return code, out, err
-    return run_program
-
-
-@pytest.fixture
-def save(tmp_path):
-    """Write some inputs to a JSON file; give back its path."""
-    def save_inputs(inputs):
-        path = tmp_path / f"inputs-{len(list(tmp_path.iterdir()))}.json"
-        path.write_text(json.dumps(inputs), encoding="utf-8")
-        return str(path)
-    return save_inputs
 
 
 def test_the_example_runs_and_gives_the_spreadsheets_answer(run, save):
@@ -80,3 +60,47 @@ def test_a_missing_file_exits_with_code_2(run):
     code, _, err = run("no-such-file.json")
     assert code == 2
     assert "Cannot read no-such-file.json" in err
+
+
+# --- Logging, on stderr -------------------------------------------------------
+
+def test_by_default_a_normal_run_logs_nothing(run, save):
+    code, _, err = run(save(ILLUSTRATION))
+    assert (code, err) == (0, "")
+
+
+def test_info_logs_the_answers(run, save):
+    code, _, err = run(save(dict(ILLUSTRATION, share_price=250)), "--log-level", "INFO")
+    assert code == 0
+    assert "INFO: DCF value per share 257.0" in err
+    assert "INFO: market-implied forecast period: 4 years at a share price of 250" in err
+
+
+def test_debug_logs_every_row(run, save):
+    code, _, err = run(save(ILLUSTRATION), "--log-level", "DEBUG")
+    assert code == 0
+    assert sum(line.startswith("DEBUG: year ") for line in err.splitlines()) == 25
+
+
+def test_the_log_never_mixes_into_the_json(run, save):
+    code, out, err = run(save(ILLUSTRATION), "--json", "--log-level", "DEBUG")
+    assert code == 0 and err
+    assert json.loads(out)["dcf"]["value_per_share"] == pytest.approx(257.07, abs=BOOK)
+
+
+def test_a_warning_when_no_forecast_period_reaches_the_price(run, save):
+    code, _, err = run(save(dict(ILLUSTRATION, share_price=100000)))
+    assert code == 0
+    assert "WARNING: no market-implied forecast period at a share price of 100000" in err
+
+
+def test_a_warning_when_value_per_share_is_negative(run, save):
+    code, _, err = run(save(dict(ILLUSTRATION, debt=1000)))
+    assert code == 0
+    assert "WARNING: value per share is negative" in err
+
+
+def test_errors_are_logged_even_at_the_quietest_level(run):
+    code, _, err = run("no-such-file.json", "--log-level", "ERROR")
+    assert code == 2
+    assert "ERROR: Cannot read no-such-file.json" in err

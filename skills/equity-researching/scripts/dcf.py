@@ -7,7 +7,7 @@ SOURCES
     Chapter 2 appendix, "Estimating Continuing Value"       equations 2.6 to 2.9
     The authors' price-implied expectations spreadsheet     the reverse DCF
       (expectationsinvesting.com, Online Tutorial 8)
-    test_dcf.py checks this program against the numbers printed in all three.
+    The tests in tests/ check this program against the numbers printed in all three.
 
 THE IDEA
     The forecast period is the number of years a company is expected to keep
